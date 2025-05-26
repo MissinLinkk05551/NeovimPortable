@@ -51,14 +51,59 @@ install_package() {
     fi
   # Debian/Ubuntu (apt)
   elif check_command "apt"; then
-    if dpkg -s "$package_name" >/dev/null 2>&1; then
-      echo "✅ $human_name already installed (via apt)."
-    else
-      echo "⏳ Installing $human_name with apt..."
-      sudo apt update -qq
-      sudo apt install -y "$package_name" || { echo "❌ Failed to install $human_name with apt. Please install manually."; exit 1; }
-      echo "✅ $human_name installed (via apt)."
+    local apt_package_to_install="$package_name"
+    local command_to_verify="$package_name"
+
+    if [ "$package_name" == "fd" ]; then
+      apt_package_to_install="fd-find"  # On Debian/Ubuntu, the package is fd-find
+      # We still want to verify the 'fd' command later, potentially after symlinking
     fi
+
+    # Check if the target command (e.g., 'fd' or 'fdfind') is already available
+    if [ "$package_name" == "fd" ] && (check_command "fd" || check_command "fdfind"); then
+        echo "✅ $human_name (fd/fdfind command) already available."
+    elif check_command "$command_to_verify"; then
+        echo "✅ $human_name ($command_to_verify command) already available."
+    else
+      # If command not available, check if the specific apt package is installed
+      if dpkg -s "$apt_package_to_install" >/dev/null 2>&1; then
+        echo "✅ $human_name ($apt_package_to_install package) already installed (via apt)."
+      else
+        echo "⏳ Installing $human_name ($apt_package_to_install) with apt..."
+        # Run apt update, but don't exit if it fails (e.g. no network temporarily)
+        sudo apt update -qq || echo "⚠️  sudo apt update failed. Continuing with install attempt..."
+        sudo apt install -y "$apt_package_to_install" || { echo "❌ Failed to install $human_name ($apt_package_to_install) with apt. Please install manually."; exit 1; }
+        echo "✅ $human_name ($apt_package_to_install package) installed (via apt)."
+      fi
+    fi
+
+    # If we were trying to get 'fd' and 'fd-find' was involved,
+    # and 'fd' command still doesn't exist but 'fdfind' does, create a symlink.
+    if [ "$package_name" == "fd" ] && [ "$apt_package_to_install" == "fd-find" ]; then
+      if ! check_command "fd" && check_command "fdfind"; then
+        echo "ℹ️  'fdfind' command found. Attempting to symlink it to 'fd' in /usr/local/bin..."
+        local fdfind_path
+        fdfind_path=$(command -v fdfind)
+        if [ -n "$fdfind_path" ]; then
+          if sudo ln -sf "$fdfind_path" /usr/local/bin/fd; then
+            echo "✅ Symlink 'fd' created successfully from '$fdfind_path' to '/usr/local/bin/fd'."
+            # For the current script execution, ensure /usr/local/bin is in PATH
+            # This helps the script's subsequent `check_command "fd"` to pass
+            export PATH="/usr/local/bin:$PATH"
+          else
+            echo "⚠️  Could not create symlink for 'fd' from '$fdfind_path' to /usr/local/bin/fd."
+            echo "   You might need to do this manually: sudo ln -s '$fdfind_path' /usr/local/bin/fd"
+            echo "   Ensure /usr/local/bin is in your PATH and you have sudo privileges."
+            echo "   Alternatively, some systems might prefer a symlink in ~/.local/bin (if it's in PATH)."
+          fi
+        else
+          echo "⚠️  'fdfind' was reportedly installed or available, but not found in PATH for symlinking."
+        fi
+      elif check_command "fd"; then
+        echo "✅ 'fd' command is available (possibly already symlinked or aliased)."
+      fi
+    fi
+
   # Fedora (dnf)
   elif check_command "dnf"; then
     if dnf list installed "$package_name" >/dev/null 2>&1; then
@@ -78,10 +123,21 @@ install_package() {
       echo "✅ $human_name installed (via pacman)."
     fi
   else
-    echo "⚠️ Could not determine package manager. Please ensure $human_name is installed."
+    # Fallback check if the command exists by other means
+    if check_command "$package_name"; then
+        echo "✅ $human_name ($package_name command) found (likely pre-installed or manually installed)."
+    elif [ "$package_name" == "fd" ] && check_command "fdfind"; then
+        echo "✅ $human_name (fdfind command) found. The script will attempt to symlink 'fdfind' to 'fd' if on a compatible system."
+        # The symlink logic for fd-find on apt systems is handled above.
+        # For other systems where fd-find might exist without a package manager being detected here,
+        # user might need manual intervention if 'fd' is strictly required over 'fdfind'.
+    else
+        echo "⚠️ Could not determine package manager OR $human_name is not installed. Please ensure $human_name is installed and in your PATH."
+        # Consider exiting if this is a critical dependency:
+        # if [ "$package_name" == "fd" ] || [ "$package_name" == "ripgrep" ]; then exit 1; fi
+    fi
   fi
 }
-
 
 # --- Main Setup ---
 
